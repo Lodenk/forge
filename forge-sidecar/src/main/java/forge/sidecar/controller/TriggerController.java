@@ -3,6 +3,7 @@ package forge.sidecar.controller;
 import forge.sidecar.model.CardRef;
 import forge.sidecar.model.OracleResponse;
 import forge.sidecar.service.ForgeCardLoader;
+import forge.sidecar.service.SvarTranslator;
 import forge.game.card.Card;
 import forge.game.trigger.Trigger;
 import forge.game.trigger.TriggerType;
@@ -25,7 +26,7 @@ public class TriggerController {
     public record TriggerRequest(
         CardRef trigger,
         String event,
-        CardRef entered,   // the card that entered/died, nullable for some events
+        CardRef entered,
         Map<String, String> context
     ) {}
 
@@ -42,20 +43,17 @@ public class TriggerController {
                 return OracleResponse.unsupported("Trigger card not found: " + req.trigger().name());
             }
 
-            TriggerType targetType = switch (req.event()) {
-                case "permanentEntered" -> TriggerType.ChangesZone;
-                case "permanentDied"    -> TriggerType.ChangesZone;
-                default -> null;
-            };
+            TriggerType targetType = TriggerType.ChangesZone;
 
-            List<Map<String, Object>> effects = new ArrayList<>();
-            List<String> warnings = new ArrayList<>();
-            boolean anyMatched = false;
+            List<Map<String, Object>> effects  = new ArrayList<>();
+            List<String>             warnings  = new ArrayList<>();
+            boolean anyTriggersMatched = false;
+            boolean anyTranslated      = false;
+            boolean anyUntranslated    = false;
 
             for (Trigger t : card.getTriggers()) {
                 if (t.getMode() != targetType) continue;
 
-                // For zone-change triggers, check Destination=Battlefield (ETB) or Origin=Battlefield (death)
                 String dest   = t.hasParam("Destination") ? t.getParam("Destination") : "";
                 String origin = t.hasParam("Origin")      ? t.getParam("Origin")      : "";
 
@@ -63,39 +61,83 @@ public class TriggerController {
                 boolean isDeath = "permanentDied".equals(req.event())    && "Battlefield".equals(origin);
 
                 if (!isEtb && !isDeath) continue;
-                anyMatched = true;
 
-                // Build a description-level effect. This is the spike's key test point:
-                // can we get semantic effect data, or just a human-readable description?
-                Map<String, Object> effect = new LinkedHashMap<>();
-                effect.put("type", "TRIGGER_FIRED");
-                effect.put("triggerCard", req.trigger().name());
-                effect.put("event", req.event());
-                effect.put("triggerDescription", t.toString());
-
-                // Attempt to extract the Execute SVar for more detail
-                if (t.hasParam("Execute")) {
-                    String svarName = t.getParam("Execute");
-                    String svarText = card.getSVar(svarName);
-                    effect.put("executeAbility", svarText != null ? svarText : svarName);
+                if (!matchesControllerFilter(
+                        t.hasParam("ValidCard") ? t.getParam("ValidCard") : null,
+                        req.entered(),
+                        req.context())) {
+                    continue;
                 }
 
-                effects.add(effect);
+                anyTriggersMatched = true;
+
+                if (!t.hasParam("Execute")) {
+                    warnings.add("Trigger has no Execute SVar: " + t);
+                    anyUntranslated = true;
+                    continue;
+                }
+
+                String svarName = t.getParam("Execute");
+                String svarText = card.getSVar(svarName);
+                if (svarText == null || svarText.isBlank()) {
+                    warnings.add("Execute SVar not found: " + svarName);
+                    anyUntranslated = true;
+                    continue;
+                }
+
+                SvarTranslator.ChainResult chain = SvarTranslator.parseChain(svarText, card);
+                if (!chain.effects().isEmpty()) {
+                    effects.addAll(chain.effects());
+                    anyTranslated = true;
+                }
+                if (chain.untranslatableSteps() > 0) {
+                    // Some steps in the chain couldn't be translated — mark partial so the
+                    // caller knows the effect list may be incomplete.
+                    anyUntranslated = true;
+                    warnings.add("Partial translation for " + svarName + ": "
+                        + chain.untranslatableSteps() + " step(s) not translatable");
+                }
+                if (chain.effects().isEmpty() && chain.untranslatableSteps() == 0) {
+                    // Empty chain — no Execute SVar body or fully empty
+                    warnings.add("Empty SVar chain for: " + svarName);
+                    anyUntranslated = true;
+                }
             }
 
-            if (!anyMatched) {
-                return OracleResponse.unsupported("No matching " + req.event() + " trigger found on: " + req.trigger().name());
+            if (!anyTriggersMatched) {
+                return OracleResponse.unsupported(
+                    "No matching " + req.event() + " trigger on: " + req.trigger().name());
             }
 
-            // Mark partial: we can confirm triggers fire and describe them, but
-            // translating Execute SVars to VttActionProposals requires more work.
-            warnings.add("Trigger descriptions are informational; VTT action translation not yet implemented.");
-            return OracleResponse.forge("partial", effects, warnings);
+            // Confidence: exact if all triggers translated; partial if mixed or none translated
+            // (partial still tells the caller that the trigger DOES fire, just may be incomplete).
+            String confidence = (anyTranslated && !anyUntranslated) ? "exact" : "partial";
+            return OracleResponse.forge(confidence, effects, warnings);
 
         } catch (Exception e) {
             return OracleResponse.unsupported("Error reading triggers: " + e.getMessage());
         } finally {
             loader.clearBattlefield();
         }
+    }
+
+    static boolean matchesControllerFilter(String validCard, CardRef entered, Map<String, String> context) {
+        if (validCard == null || entered == null || context == null) {
+            return true;
+        }
+
+        String enteredSeatId = entered.seatId();
+        String selfSeatId = context.get("selfSeatId");
+        if (enteredSeatId == null || selfSeatId == null) {
+            return true;
+        }
+
+        if (validCard.contains("YouCtrl") && !enteredSeatId.equals(selfSeatId)) {
+            return false;
+        }
+        if (validCard.contains("OppCtrl") && enteredSeatId.equals(selfSeatId)) {
+            return false;
+        }
+        return true;
     }
 }

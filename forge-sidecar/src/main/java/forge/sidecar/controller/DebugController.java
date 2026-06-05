@@ -7,12 +7,14 @@ import forge.game.staticability.StaticAbility;
 import forge.game.staticability.StaticAbilityLayer;
 import forge.game.staticability.StaticAbilityMode;
 import forge.game.zone.ZoneType;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
 
 @RestController
 @RequestMapping("/v1/debug")
+@ConditionalOnProperty(name = "forge.sidecar.debug.enabled", havingValue = "true")
 public class DebugController {
 
     private final ForgeCardLoader loader;
