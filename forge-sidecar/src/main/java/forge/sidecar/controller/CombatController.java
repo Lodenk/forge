@@ -36,16 +36,15 @@ public class CombatController {
 
             for (CardRef blockerRef : req.potentialBlockers()) {
                 Card blocker = loader.load(blockerRef);
+                String id = blockerRef.instanceId() != null ? blockerRef.instanceId() : blockerRef.name();
                 if (blocker == null) {
-                    warnings.add("Blocker card not found, skipped: " + blockerRef.name());
+                    // Fail open: unknown cards are assumed eligible so valid blockers aren't suppressed.
+                    warnings.add("Blocker card not found, assumed eligible: " + blockerRef.name());
+                    effects.add(Map.of("type", "BLOCKER_ELIGIBILITY", "instanceId", id, "eligible", true));
                     continue;
                 }
                 boolean canBlock = CombatUtil.canBlock(attacker, blocker);
-                effects.add(Map.of(
-                    "type", "BLOCKER_ELIGIBILITY",
-                    "instanceId", blockerRef.instanceId() != null ? blockerRef.instanceId() : blockerRef.name(),
-                    "eligible", canBlock
-                ));
+                effects.add(Map.of("type", "BLOCKER_ELIGIBILITY", "instanceId", id, "eligible", canBlock));
             }
 
             return OracleResponse.forge("exact", effects, warnings);
