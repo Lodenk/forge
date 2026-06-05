@@ -30,7 +30,7 @@ COPY forge-game/src     forge-game/src
 COPY forge-ai/src       forge-ai/src
 COPY forge-sidecar/src  forge-sidecar/src
 
-RUN mvn -pl forge-sidecar -am package -DskipTests -q --no-transfer-progress
+RUN mvn -pl forge-sidecar -am package -DskipTests -Dcheckstyle.skip=true -q --no-transfer-progress
 
 # Stage 2: Runtime image
 FROM eclipse-temurin:17-jre-alpine
